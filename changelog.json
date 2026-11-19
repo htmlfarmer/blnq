@@ -1,0 +1,384 @@
+{
+  "app": "blnq",
+  "note": "What changed and WHY. Consumed by `blnq update` (prints entries newer than your version) and rendered on the website. Newest first.",
+  "versions": [
+    {
+      "version": "0.6.4",
+      "date": "2026-11-19",
+      "summary": "The filesystem-jail release: bwrap no longer shows your home directory to foreign code, the pre-flight gates stop lying about parse/network, and the gated egress stack (proxy-only docker network) is built and tested — switch staged for the next API restart.",
+      "changes": [
+        {
+          "kind": "security",
+          "what": "The bwrap jail now starts from an EMPTY root: only system paths, the interpreter's own paths and the job's directory are mounted. The old `--ro-bind / /` gave job code your entire home directory at your own uid — `~/.config/blnq/auth.json` and the worker key were one print() away from whoever submitted the job, with no network needed (stdout returns to the submitter; file:// never opens a socket).",
+          "why": "Audit 2026-11-19, finding 1 (the prerequisite fix). Secret dirs inside a mounted prefix are blanked with tmpfs, `$HOME` itself is never mounted, and nodes now advertise sandbox-bwrap-v2 so the hub can tell a filesystem-jailed bwrap from an open one (set BLNQ_REQUIRE_FS_JAIL=1 on the hub after the fleet updates).",
+          "example": "python3 tests/test_bwrap_jail.py   → 33 checks: auth.json, runner.key, blnq state and a planted $HOME canary are all 'blocked:FileNotFoundError' inside the jail, while /etc/passwd, imports, jobdir and /tmp writes still work — for python and node."
+        },
+        {
+          "kind": "fixed",
+          "what": "duh/check/evaluate no longer claim \"does not parse\" for languages they cannot parse (11 of 34 files in the audit): syntax is tri-state — python ast, bash -n, node --check when present, otherwise \"not verified locally\" (never a blocker). Network detection no longer trusts import statements: subprocess curl, importlib-imported urllib, URL literals and the `\"https://\" + host` concat shape are all caught, each verdict carrying readable evidence.",
+          "why": "Audit findings 2-3: a confident wrong reason is worse than none, and gates that wave B04/B07 through would have run them for real the moment egress opened. Write-method shapes (POST/PUT) get their own blocker — the egress proxy allows GET/HEAD only, so that is a policy refusal, not an availability note.",
+          "example": "blnq duh netpost.py  →  ✗ sends data (write method .post( (python)) — the egress proxy allows GET/HEAD only, so this would be refused at the socket"
+        },
+        {
+          "kind": "added",
+          "what": "Gated egress for docker jobs, built and proven before the switch: blnq-egress is a Docker --internal bridge with NO route out; the policy proxy is the job's only peer; BLNQ_EGRESS_ALLOW_LAN takes exact host/IP entries only (no CIDRs, no wildcards, never loopback/metadata); clients outside the job subnet get 403; /api/egress/status (public) and /api/egress/audit (admin) expose the state and the decisions; scripts/egress-firewall.sh is the host-level nftables belt.",
+          "why": "\"go look this up for me\" is genuinely useful, so the gate was built first and tested against real sockets: tests/test_egress_stack.js proves masjid reachable through the proxy while the router, cloud-metadata, non-entry LAN hosts, localhost, POST and raw sockets are all refused. The switch itself is staged as BLNQ_EGRESS=on in api/.env and activates at the next API restart."
+        },
+        {
+          "kind": "fixed",
+          "what": "`blnq login` against a plain-http local hub (BLNQ_HUB=http://127.0.0.1:3099) works again: loopback origins declare X-Forwarded-Proto and the cookie jar returns Secure cookies over loopback http only.",
+          "why": "Production marks session cookies Secure, so express-session silently issued none over plain http — the CLI could never authenticate against the local test hub and tests/cli_smoke.sh died at the first authed call. Remote plaintext origins are deliberately not included: auth there must fail loudly."
+        }
+      ]
+    },
+    {
+      "version": "0.6.3",
+      "date": "2026-11-18",
+      "summary": "The external-audit release: twelve fixes from a full field review — stdlib imports on macOS python3.9, docker found off-PATH, a token that was loaded and dropped, a broken watch stream, an honest scanner, and the first (refused) publish of this very version.",
+      "changes": [
+        {
+          "kind": "security",
+          "what": "The first build published as 0.6.3 contained a Python SyntaxError — and `blnq update` REFUSED to install it (healthcheck failed, every user stayed safely on 0.6.2). The fixed build is verified: compiles, healthcheck {\"ok\": true}, new digest.",
+          "why": "The updater's healthcheck is the last line of defence against a bad publish, and it worked exactly as designed: a broken artifact never reached a single machine. Published sha was e30ebd72 (refused); the fixed file is 7d178de1.",
+          "example": "$ blnq update\n[blnq] healthcheck failed (rc=1, source=cli)   ← the safety net, doing its job\n# fixed build:\n$ blnq update\n[blnq] applied (source=cli) → /usr/local/lib/blnq/blnq-cli.py"
+        },
+        {
+          "kind": "fixed",
+          "what": "sys.stdlib_module_names is Python 3.10+ and macOS ships 3.9 forever — blnq evaluate crashed with AttributeError, and the same empty-set fallback made sys/os/json/re/collections report as 'third-party imports not in the sandbox'. A real curated 3.9 stdlib list now sits behind both paths.",
+          "why": "The whole evaluate command was dead on the most common Mac setup, and the advice it gave was both wrong and unfollowable — you cannot pip-install the standard library.",
+          "example": "$ blnq evaluate myscript.py\n  (sys, os, json, re, collections classified as stdlib again — no crash)"
+        },
+        {
+          "kind": "fixed",
+          "what": "Docker Desktop ships its CLI at /Applications/Docker.app/Contents/Resources/bin without symlinking it anywhere — blnq now probes the known locations (~/.docker/bin, ~/.docker/desktop/bin, the app bundle) and prepends them process-wide, so a launchd-spawned agent with a minimal PATH still finds docker.",
+          "why": "On a clean PATH, 0.6.3 says 'sandbox ✓ docker' exactly where 0.6.2 said '✗ rlimit — NO jail' for a fully working Docker. When the binary exists but the daemon is down, blnq security names the path and the fix instead of shrugging.",
+          "example": "0.6.2:  sandbox  ✗ rlimit — NO jail (docker/bwrap not found)\n0.6.3:  sandbox  ✓ docker — foreign code only runs jailed"
+        },
+        {
+          "kind": "fixed",
+          "what": "cmd_details loaded the read token for your last run and never sent it — details of a PRIVATE run 403'd its own creator. The token now goes out as X-Run-Token, with a clear message when a token isn't stored (only the last run's is kept).",
+          "why": "The token exists precisely so the CLI — which has no session — can read back what it just created. Loading it and dropping it made 'details' useless for the one audience it serves."
+        },
+        {
+          "kind": "fixed",
+          "what": "blnq watch crashed instantly: it passed float(\"inf\") to socket.settimeout, which cannot represent infinity (OverflowError). It now passes None — block forever — and _sse_read converts any NaN/inf defensively.",
+          "why": "Pre-existing since watch shipped: the command had been broken for everyone, on every version."
+        },
+        {
+          "kind": "added",
+          "what": "The offline scanner now sees JavaScript — eval / new Function, child_process exec/spawn/fork, fetch/axios — ported from the hub's own safetyCheck.js, plus a taint rule: an env-var source AND a network sink in one file is flagged (WARN), never 'OK'.",
+          "why": "The fast, free, first pass said 'OK no issues found' for exactly the code that matters most — Python env→urlopen exfiltration and JS eval chains — while the AI gate caught them all. The first pass must never be blinder than the second.",
+          "example": "$ blnq scan evil.js\n  CRITICAL  line 3: dynamic code execution (eval / new Function)\n  WARN      line 7: secret source (environment) AND network call in one file — possible exfiltration"
+        },
+        {
+          "kind": "fixed",
+          "what": "Unsupported file types now print '⚠ NOT SCANNED — local rules cover Python/JavaScript/shell' instead of a green 'OK no issues found' (generic secret+PII rules still run on everything).",
+          "why": "A green OK on a file type we have no language rules for is a claim we did not check — and people believe it."
+        },
+        {
+          "kind": "added",
+          "what": "blnq FILE.py --allow-secrets — the leak gate's documented escape hatch finally exists as a flag (it only worked as BLNQ_ALLOW_SECRETS=1).",
+          "why": "The error message told people to pass a flag that argparse had never heard of."
+        },
+        {
+          "kind": "fixed",
+          "what": "blnq FILE.py --secret K=V now fails LOUDLY with the working alternative (blnq jobs submit --secret …) instead of silently dropping the secret into script argv.",
+          "why": "A secret that silently never arrives is worse than an error: the script runs, gets no key, and the user debugs the wrong thing."
+        },
+        {
+          "kind": "added",
+          "what": "blnq review on 401 says 'log in first: blnq login' and points at verify (no account needed) instead of a bare Authentication required.",
+          "why": "verify tells you to run review; review used to dead-end. A dead end in the trust workflow is how people give up on signatures."
+        },
+        {
+          "kind": "added",
+          "what": "The blnq wrapper probes for python3.13/3.12/3.11/3.10 before falling back to python3.",
+          "why": "macOS will never ship a newer python3, so without probing every Mac runs the oldest interpreter forever — and hits 3.9-only gaps like the evaluate crash fixed above."
+        },
+        {
+          "kind": "added",
+          "what": "Testing knobs: BLNQ_SANDBOX_TIER=docker|bwrap|subprocess forces a tier on the agent (set it on the AGENT, never by job code), and a degradation to the un-jailed subprocess tier is now logged loudly as a SECURITY event instead of a perf note.",
+          "why": "A node that advertised a jail and then ran foreign code without one should leave a mark in the log — silently degrading to the dangerous tier is how a protection quietly disappears."
+        },
+        {
+          "kind": "fixed",
+          "what": "openapi.yaml now matches the live API: POST /api/scripts wants `name` (the spec said `title`, which 400'd on every attempt).",
+          "why": "The spec is what an integrator trusts first; a wrong required field there costs an hour before any code runs."
+        }
+      ]
+    },
+    {
+      "version": "0.6.2",
+      "date": "2026-11-18",
+      "summary": "The 'one command does everything' release: blnq stop actually STOPS, blnq security audits this machine, blnq install docker resumes from any previous attempt, and blnq nodes shows the fleet — tables + emoji for humans, --json for AIs.",
+      "changes": [
+        {
+          "kind": "added",
+          "what": "blnq suggest (alias: blnq report) — send ideas, bugs or security reports straight to the hub; stored in the network's database so nothing is lost, with an operator inbox (GET /api/suggest, admin token) to read them. Bare `blnq suggest` prompts you; AIs use --json or POST /api/suggest directly (public, rate-limited, documented in ai.txt).",
+          "why": "The network should be able to hear back from the people — and AIs — using it, without needing an account or an issue tracker. One command for humans, one endpoint for machines, one inbox for us.",
+          "example": "$ blnq suggest \"dark mode for the dashboard, please\"\n✓ suggestion recorded — #42 · status new (thanks 🙏)\n\n$ blnq report --kind security --json \"found an issue in verify\"\n{\"ok\":true,\"id\":43,\"status\":\"new\",...}"
+        },
+        {
+          "kind": "added",
+          "what": "blnq emergency (alias: emergancy) — the big red button: leaves volunteer mode, disables respawn (keepalive + autostart), stops the agent, and prints how to restore. Hub-side: POST /api/control/shutdown-workers with the admin token pushes shutdown_requested to ONE node or ALL live nodes.",
+          "why": "blnq stop alone is not an emergency stop: on a keepalive box systemd respawns the agent within 5 minutes with volunteer mode still on. An emergency brake the machine can undo by itself is not a brake.",
+          "example": "$ blnq emergency\n■ EMERGENCY STOP — Stuarts-iMac-Pro\n  jobs, respawn and volunteering on THIS machine\n\n  ✓ volunteer mode → OFF  (no jobs will be claimed)\n  ✓ keep-alive removed\n  ✓ respawn disabled (keepalive/autostart)\n  ✓ stopped (was pid=41747)\n\n  this machine stays stopped until you say otherwise:\n    blnq volunteer on        # rejoin (auto-restarts the agent)\n    blnq keepalive on        # re-enable respawn"
+        },
+        {
+          "kind": "changed",
+          "what": "blnq stop now stops EVERYTHING and STAYS stopped: it kills in-flight job processes, leaves a durable stop intent that keepalive and autostart respect (it survives a reboot), and blnq start brings the whole thing back. blnq restart cycles it all in one command.",
+          "why": "stop used to be self-defeating three ways: the agent deleted the stop file as it shut down, the keepalive timer unlinked it and respawned the agent within 5 minutes, and job processes were orphaned to keep running with nobody left to cancel them. A stop the machine can undo by itself is not a stop.",
+          "example": "$ blnq stop\n✓ stopped (was pid=41747) — 1 job process(es) killed\n  nothing will respawn until: blnq start\n\n$ blnq keepalive run\n[blnq keepalive] stopped by user — not respawning (blnq start to resume)"
+        },
+        {
+          "kind": "added",
+          "what": "blnq security — one command for the safety posture of BOTH sides: is this machine jailed, are secrets at rest private (it auto-hardens config/state to 700/600), does the hub's registered tier match reality, is the node active and current? Exit code 1 on FAIL so it can run in cron/CI.",
+          "why": "Health (doctor) and safety are different questions: a machine can be perfectly healthy while advertising a jail it does not have. This command cross-checks local truth against the hub's view and fixes what it safely can.",
+          "example": "$ blnq security\n  🔒 this machine\n    sandbox       bwrap ✓ — foreign code only runs jailed\n    volunteer     OFF · 1 job(s) max · 1024 MB\n    config perms  hardened 3 path(s) → 700/600\n  🌐 this node on the network\n    version       0.6.1 ✓ current\n    registered tier  bwrap ✓\n    hub state     active\n  verdict: PASS — jailed, private, current, registered"
+        },
+        {
+          "kind": "added",
+          "what": "blnq install sandbox — one command that installs the right jail for this machine and PROBES it afterwards, so success is only claimed when the jail actually works. On macOS it downloads and installs Docker Desktop itself (no brew — Intel Macs are Tier 3 there), system-wide when possible and user-local otherwise. On Linux it installs bubblewrap (tiny, unprivileged). blnq install docker / blnq docker targets the docker runtime specifically. All paths finish with the exact next steps.",
+          "why": "Telling people to 'install a jail' and leaving them to choose a package manager is how protection never gets installed. The command does the OS-appropriate thing, handles sudo/password prompts, and fails with the manual command when it cannot.",
+          "example": "$ blnq docker\n  installing colima + docker via Homebrew…\n  starting colima (first run downloads a VM — a few minutes)…\n✓ docker ready — sandbox tier: docker\n\n  next: blnq security      # verdict for this machine\n        blnq volunteer on   # then start taking jailed jobs"
+        },
+        {
+          "kind": "added",
+          "what": "blnq nodes — who's out there, as a glanceable table: online marker, hostname, platform, the jail each node runs (docker/bwrap/rlimit/legacy), volunteering, reputation, last seen, and a bee-count footer. Machines get blnq nodes --json — same endpoint, stable JSON, no emoji. The --json rule applies to every data command (see ai.txt → cli_for_ai).",
+          "why": "Raw JSON is the right answer for a machine and the wrong answer for a person. The network should be glanceable at a glance — and AIs should never have to parse an emoji to find the fleet.",
+          "example": "$ blnq nodes\n    hostname                platform  sandbox   vol  rep  last seen\n  ✓ Stuarts-iMac-Pro.local macOS     docker    ✓    0    12s ago\n  ✓ masjid                 linux     bwrap     ✓    1    1m ago\n  ✗ reap-test              –         –         –    0    3d ago\n\n    🐝 2/3 online · 2 volunteering · 2 jailed"
+        }
+      ]
+    },
+    {
+      "version": "0.6.1",
+      "date": "2026-11-18",
+      "summary": "The protect-volunteers release: other people's code now only runs inside a real jail (docker or bubblewrap), the installer provisions one for you, and volunteer on/off is a single command.",
+      "changes": [
+        {
+          "kind": "security",
+          "what": "Volunteer mode now REQUIRES a real sandbox. The agent refuses to claim anyone else's code unless it can run it inside docker or bubblewrap. On macOS that means Docker Desktop, OrbStack or colima — the old rlimit fallback has no memory cap there (Darwin ignores RLIMIT_AS) and no network isolation at all.",
+          "why": "Measured, not theorised: an un-jailed job on a macOS node saw the real hostname, the user's home directory, and could reach the local network — while its 1024 MB limit was decorative. The machine itself must enforce the jail, not just the hub's routing.",
+          "example": "$ blnq volunteer on\n✗ no sandbox on this machine — volunteer jobs would run UNJAILED\n  install a jail first, then retry:\n    Linux:  sudo apt install bubblewrap   (or docker)\n    macOS:  Docker Desktop · OrbStack · colima (brew install colima docker)\n  to opt in without protection anyway: blnq volunteer on --unsafe"
+        },
+        {
+          "kind": "added",
+          "what": "blnq status and blnq doctor now show which jail you are in (bwrap / docker / rlimit — NO jail) and what that means for volunteering.",
+          "why": "You cannot protect a machine you cannot inspect. The tier used to be invisible — a node looked perfectly healthy while running foreign code unjailed.",
+          "example": "  🤝 volunteer mode\n    sandbox       bwrap ✓\n    sharing       ✓ ON\n    limits        1 job(s) at once · 25% cpu · 1024 MB\n\n  sandbox\n  ✓ bwrap jail   volunteer jobs: allowed"
+        },
+        {
+          "kind": "added",
+          "what": "The installer detects the sandbox during setup, offers to install bubblewrap on Linux (one prompt, default yes), pre-pulls the docker python image, and prints the exact macOS routes. Flags: --with-sandbox (no prompt), --no-sandbox (skip).",
+          "why": "Protection you must remember to install is protection nobody installs. bubblewrap is a tiny unprivileged package — cheap enough to offer by default, and blnq still works without it for YOUR OWN code.",
+          "example": "  ✓ sandbox    none\n  ! no jail found — YOUR code runs fine, but volunteer mode\n    (other people's code here) will be refused until one exists\n  Install bubblewrap now? protects this PC when volunteering [Y/n] Y\n  ✓ bubblewrap installed — sandbox: bwrap"
+        },
+        {
+          "kind": "added",
+          "what": "blnq volunteer on and off now restart the agent for you — one command instead of two.",
+          "why": "Capabilities only leave the machine at register time, so a change without a restart looked applied locally while the hub still saw the old state. Asking people to type blnq restart afterwards meant most people never did.",
+          "example": "$ blnq volunteer off\nblnq volunteer — ✓ thanks for the help — you've left the volunteer corps.\n\napplying — restarting agent (pid 41747)…\n✓ stopped (was pid=41747)\n✓ started (pid=51233)"
+        },
+        {
+          "kind": "security",
+          "what": "The hub only nudges nodes that advertise a real jail (sandbox-bwrap-v1 / sandbox-docker-v1). Pre-tier clients keep receiving jobs until they update; updated nodes advertising sandbox-rlimit-v1 are skipped. Operator escape hatch: BLNQ_ALLOW_WEAK_SANDBOX=1.",
+          "why": "Defence on both sides: the hub refuses to route foreign code to an un-jailed node, and the node refuses to claim it — so neither a mis-route nor a modified client can run strangers' code unprotected."
+        },
+        {
+          "kind": "added",
+          "what": "Operator node controls, all guarded by Bearer $BLNQ_ADMIN_TOKEN: DELETE /api/workers/<id> (temporary deactivate — heals on restart), POST .../activate (re-enable), POST .../retire (PERMANENT — the node can no longer register or heartbeat, even after a wiped state file, because retirement follows the hardware id), POST .../readmit (the only way back, and it requires a human with the token).",
+          "why": "For a security incident you need a kill switch the affected machine cannot undo. Deactivate is maintenance; retire is 'not welcome back until a human decides so'.",
+          "example": "# permanently retire a node:\ncurl -X POST https://blnq.org/api/workers/worker_a5afd8cb20e6/retire \\\n  -H 'Authorization: Bearer $BLNQ_ADMIN_TOKEN'\n→ {\"ok\":true,\"retired\":true}\n\n# the node's own next register:\n→ 403 {\"code\":\"NODE_RETIRED\",\"error\":\"this node has been RETIRED by an operator…\"}\n\n# later, after investigation:\ncurl -X POST …/readmit -H 'Authorization: Bearer $BLNQ_ADMIN_TOKEN'"
+        },
+        {
+          "kind": "changed",
+          "what": "Node metadata carries the sandbox tier: /api/workers/list shows sandbox: docker|bwrap|rlimit|legacy per node, and the heartbeat reports the live tier in metrics.",
+          "why": "The network map should show who is protected and how — 'legacy' means unknown (pre-tier client), which is honest rather than reassuring."
+        }
+      ]
+    },
+    {
+      "version": "0.6.0",
+      "date": "2026-11-17",
+      "summary": "The 'it should just work like python' release — errors explained before they happen, a leak gate on everything you send, and human votes that actually count.",
+      "changes": [
+        {
+          "kind": "added",
+          "what": "blnq FILE.py now parses the file LOCALLY before uploading. A syntax error shows the exact line, a caret, what it means and the command to fix it — in milliseconds, with no round trip.",
+          "why": "A file that cannot compile here cannot compile in the sandbox either. Sending it bought nothing but a slower version of the same error, and it was the single most common failure we saw."
+        },
+        {
+          "kind": "added",
+          "what": "When a run fails, blnq explains it automatically: the error is matched against a local knowledge base (523 origin down, 401 not logged in, 403 safety gate, 409 key conflict, sha256 mismatch, bwrap fallback, timeouts, OOM…) and prints what it means plus the fix.",
+          "why": "Advice you have to know to ask for is advice you will not get. It fires on failure, on stderr, so stdout stays byte-identical to `python file.py`."
+        },
+        {
+          "kind": "security",
+          "what": "Registering a validator now requires a signed-in account. `role=requester|runner` stays open.",
+          "why": "This endpoint was open to the internet and it was a full bypass, measured not theorised: two anonymous POSTs minted two validators, each signed 'safe' over arbitrary bytes, and quorum returned runnable:true — which makes run.js SKIP the AI safety review. One further mint signed 'unsafe' and made that subject permanently unrunnable: a one-request DoS on any public script."
+        },
+        {
+          "kind": "security",
+          "what": "One active validator per account.",
+          "why": "Requiring a login stops anonymous minting, but an attacker who can make N accounts would hold N votes — the same bypass wearing a costume."
+        },
+        {
+          "kind": "added",
+          "what": "blnq approve FILE  (aliases: vouch, endorse)  and  blnq reject FILE  (alias: object) — file a signed HUMAN verdict on any source, with --note explaining why.",
+          "why": "Quorum used to mean 'the models agreed'. Now a person can have an opinion the hub is bound to respect: your Ed25519 key signs it, so it cannot be forged or attributed to anyone else."
+        },
+        {
+          "kind": "fixed",
+          "what": "Changing your mind now works. The latest verdict from an issuer wins instead of every verdict accumulating forever.",
+          "why": "`blnq reject` then `blnq approve` left BOTH rows, so you counted as approver AND objector — and since run.js fails closed on any objection the subject stayed blocked permanently. The CLI was already promising 'undo is a new verdict' and that promise was false."
+        },
+        {
+          "kind": "fixed",
+          "what": "/api/inspect now reports the same quorum /api/attest does: filtered to active validators, latest verdict per issuer.",
+          "why": "A display that disagrees with the gate is worse than no display — the CLI says 'runnable' and the hub refuses the same bytes."
+        },
+        {
+          "kind": "added",
+          "what": "Leak gate: everything about to leave the machine is scanned, not just the script — file arguments and stdin too. Credentials block the upload (exit 3); personal data warns.",
+          "why": "`blnq analyse.py customers.csv` uploads the CSV, and nobody thinks of a data file as something that needs checking. Opt out with --allow-secrets for fixtures."
+        },
+        {
+          "kind": "added",
+          "what": "blnq scan [FILE|DIR] — the quick leak checker. Pipe data in, point it at a directory, or scan one file. Exit 3 means credentials were found.",
+          "why": "The same patterns that guard a push, available before you send anything anywhere."
+        },
+        {
+          "kind": "added",
+          "what": "blnq debug / blnq bugs (aliases: why, issues) — explain an error, or diagnose this machine and tally what keeps failing in your own agent log.",
+          "why": "Common failures deserve a named answer, not a scrollback hunt."
+        },
+        {
+          "kind": "added",
+          "what": "blnq list (aliases: runs, history), blnq who, blnq details (alias: last), blnq peers.",
+          "why": "Humans reach for different words for the same thing. An unknown command is a worse failure than a redundant one, so they all resolve to the same handler."
+        },
+        {
+          "kind": "added",
+          "what": "LAN discovery: UDP broadcast on port 3095 finds other blnq nodes without asking the internet. `blnq peers` shows the local view beside what the hub knows.",
+          "why": "Every introduction used to go through the hub, so neighbours could not find each other at all when the internet was down. Announces hostname and port only — never a key or a job."
+        },
+        {
+          "kind": "changed",
+          "what": "blnq status restructured into sections (agent / volunteer mode / hub / network) with relative times instead of raw epochs, and a curated set of network figures instead of a JSON dump.",
+          "why": "Absolute timestamps make the reader do arithmetic to learn whether a heartbeat is worrying."
+        }
+      ]
+    },
+    {
+      "version": "0.5.0",
+      "date": "2026-11-17",
+      "summary": "The 'can blnq run my project?' release — code study, a public catalog, and a safety gate that stopped crying wolf.",
+      "changes": [
+        {
+          "kind": "added",
+          "what": "blnq evaluate [PATH] — studies a codebase and reports which files blnq can run today, and what blocks the rest (deps / network / database / package / ui), with the exact command to run each ready one.",
+          "why": "People arrive with a whole project, not a single script. Static analysis (no execution) answers 'what can I hand you?' in about a second, so adoption starts with a report instead of guesswork."
+        },
+        {
+          "kind": "added",
+          "what": "blnq catalog | catalog search Q | catalog categories | catalog show SUBJECT — what the network actually runs, auto-categorised and typo-tolerant searchable ('wordfrq' finds wordfreq.py).",
+          "why": "The network should be inspectable by the public. Everything is keyed by sha256 of its own source, so a row is self-verifying: sha256(code) must equal its key, and `catalog show` re-hashes locally rather than trusting the hub."
+        },
+        {
+          "kind": "added",
+          "what": "blnq evaluate and blnq catalog emit --json for agent consumption; the catalog carries code and counters only.",
+          "why": "stdin/stdout — the DATA a script ran on — is never copied into the catalog, so a public leaderboard can show what people run without showing what they ran it on."
+        },
+        {
+          "kind": "added",
+          "what": "blnq x.py --flag data.csv now passes flags as argv and the file's CONTENTS as stdin.",
+          "why": "Previously every argument was joined into stdin, so --json arrived as data and data.csv arrived as the literal path 'data.csv' — a filename that does not exist inside the sandbox."
+        },
+        {
+          "kind": "added",
+          "what": "blnq help <cmd>, blnq <cmd> help and blnq <cmd> --help all work, including nested forms (help graph stats).",
+          "why": "All three spellings are one request. 'help' used to be lumped in with -h, so blnq help catalog silently printed the ROOT list and dropped the command you named; blnq <cmd> help died with argparse's 'invalid choice'."
+        },
+        {
+          "kind": "fixed",
+          "what": "The anonymous-run safety gate stopped flagging ordinary code. 35 of 40 real files were flagged and 19 blocked as high — including 11 of blnq's own 15 verified samples.",
+          "why": "Rules matched re.compile() as 'dynamic execution', m.group(1) as 'privilege escalation' and open(path,'r') as a file WRITE, and severity was inferred from the label text ('execution' contains 'exec'). False positives train people to click past warnings, which is how a real one gets ignored."
+        },
+        {
+          "kind": "fixed",
+          "what": "Trust now reports honestly: `runnable` agrees with what the hub actually enforces.",
+          "why": "lib/trust.js counted approvals only while routes/run.js failed closed on any objection — so the CLI printed '2/2 validators signed → runnable' and the hub then rejected the same bytes."
+        },
+        {
+          "kind": "fixed",
+          "what": "The pre-push secret scanner no longer matches across newlines or inside docstrings.",
+          "why": "An EMPTY 'BLNQ_ADMIN_TOKEN=' swallowed the line break and read the next line's identifier as a 21-char secret, and a usage line inside a docstring was treated as a leaked credential. A mention in documentation is not a credential — but a real one in a string still is."
+        },
+        {
+          "kind": "added",
+          "what": "New pages: /catalog.html (searchable, with in-browser sha256 verification) and /visualize.html (network graph, radar, donuts, geo scatter, gauges).",
+          "why": "The public should be able to review what the network is doing visually, not just read counters."
+        },
+        {
+          "kind": "changed",
+          "what": "The global navigation now upgrades itself when a destination is added.",
+          "why": "Idempotence made LINKS a one-shot list: adding a page left every already-injected page pointing at the old set, so new pages were undiscoverable."
+        }
+      ]
+    },
+    {
+      "version": "0.4.0",
+      "date": "2026-11-16",
+      "summary": "Trustworthy updates and honest speed.",
+      "changes": [
+        {
+          "kind": "fixed",
+          "what": "blnq update no longer crashes with a TypeError after applying.",
+          "why": "A local variable named `ok` shadowed the ok() printer, so the success line — printed AFTER the swap — raised 'bool object is not callable', leaving users with a traceback instead of a result."
+        },
+        {
+          "kind": "added",
+          "what": "blnq update verifies a sha256 digest, and GET /api/version now Ed25519-signs the artifact it serves.",
+          "why": "The updater is the one path that REPLACES code, so it was the single place nothing was checked. TLS alone catches neither a stale mirror nor bit-rot in transit."
+        },
+        {
+          "kind": "fixed",
+          "what": "The version nag fires for everyone (it previously 403'd on Python-urllib/3.11).",
+          "why": "A nag nobody sees is not a nag — it is silent drift."
+        },
+        {
+          "kind": "added",
+          "what": "blnq speed publishes a signed report (download/upload Mbps, CPU, RAM, disk, GPU) with an OpenSSH-style fingerprint.",
+          "why": "A node's own claim about its hardware is worth nothing unsigned; the signature lets the hub and the map both trust it."
+        },
+        {
+          "kind": "added",
+          "what": "blnq test now prints an explicit PASS/FAIL verdict across install, hub, speed and a real remote run.",
+          "why": "Four silent checks are not a test — a person needs one word that says whether it worked."
+        },
+        {
+          "kind": "fixed",
+          "what": "Installer persists PATH by default, creates missing directories, and verifies blnq is on PATH before claiming success.",
+          "why": "An installer that reports success while `blnq` is not callable wastes the only moment a user is paying attention."
+        }
+      ]
+    },
+    {
+      "version": "0.3.0",
+      "date": "2026-11-10",
+      "summary": "The trust layer: signed verdicts instead of repeated model calls.",
+      "changes": [
+        {
+          "kind": "added",
+          "what": "Ed25519 attestations, principals, and a validator quorum (2-of-3 distinct validators must agree on the same sha256).",
+          "why": "Re-running an AI safety review on identical bytes costs 12-96 seconds every time. A signed verdict IS the review — measured at 1100x faster than re-reviewing."
+        },
+        {
+          "kind": "added",
+          "what": "P2P transport: an E2E-encrypted relay inbox plus direct UDP peering with automatic fallback.",
+          "why": "The hub should carry ciphertext it cannot read, and peers that can reach each other directly should not need a relay at all."
+        }
+      ]
+    }
+  ]
+}

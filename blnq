@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# blnq — minimal launcher for the BLNQ.org client CLI.
+# Downloads + installs the client on first run, then execs it.
+#
+# Usage:
+#   blnq --help
+#   blnq start
+#   blnq submissions list
+#
+# Served at https://blnq.org/blnq and installed by install-blnq.sh.
+set -euo pipefail
+
+SELF="${BASH_SOURCE[0]:-$0}"
+if [[ -L "$SELF" ]]; then SELF="$(readlink -f "$SELF" 2>/dev/null || readlink "$SELF")"; fi
+SELF_DIR="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd || echo "$(dirname "$SELF")")"
+
+case "$SELF_DIR" in
+    */bin) PARENT_LIB="${SELF_DIR%/bin}/lib/blnq" ;;
+    *)     PARENT_LIB="$SELF_DIR" ;;
+esac
+
+CLIENT_URL="${BLNQ_CLIENT_URL:-https://blnq.org/blnq-cli.py}"
+CLIENT_FILE="${BLNQ_CLIENT_FILE:-$PARENT_LIB/blnq-cli.py}"
+
+need_python() {
+    # Prefer a NEWER interpreter when one exists: macOS ships python3.9
+    # forever and never will ship 3.10+, so look for the modern ones first
+    # and fall back to whatever `python3` means here.
+    local p
+    for p in python3.13 python3.12 python3.11 python3.10 python3; do
+        if command -v "$p" >/dev/null 2>&1; then
+            PY_BIN="$p"
+            return 0
+        fi
+    done
+    echo "[blnq] python3 not found. install it (apt install python3 / brew install python3)" >&2
+    exit 1
+}
+
+ensure_client() {
+    if [[ ! -f "$CLIENT_FILE" ]]; then
+        if ! mkdir -p "$(dirname "$CLIENT_FILE")" 2>/dev/null; then
+            echo "[blnq] cannot write to $(dirname "$CLIENT_FILE") — try:" >&2
+            echo "      curl -sSL https://blnq.org/install-blnq.sh | bash -s -- --prefix=\$HOME/.local" >&2
+            exit 1
+        fi
+        echo "[blnq] first run: fetching client from $CLIENT_URL" >&2
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL "$CLIENT_URL" -o "$CLIENT_FILE"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -qO "$CLIENT_FILE" "$CLIENT_URL"
+        else
+            echo "[blnq] need curl or wget to download the client" >&2
+            exit 1
+        fi
+        chmod 0755 "$CLIENT_FILE"
+    fi
+}
+
+need_python
+ensure_client
+exec "$PY_BIN" "$CLIENT_FILE" "$@"
